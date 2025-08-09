@@ -158,6 +158,7 @@ impl Link {
 }
 
 /// AMQP 1.0 Sender
+#[derive(Debug, Clone)]
 pub struct Sender {
     /// Base link
     link: Link,
@@ -242,6 +243,7 @@ impl Sender {
 }
 
 /// AMQP 1.0 Receiver
+#[derive(Debug, Clone)]
 pub struct Receiver {
     /// Base link
     link: Link,
@@ -286,7 +288,8 @@ impl Receiver {
             Ok(None)
         } else {
             let message = self.message_queue.remove(0);
-            self.delivery_count += 1;
+            // Don't increment delivery count here since the message was already "received"
+            // The delivery count is incremented when the message is actually received (e.g., via simulate_receive)
             Ok(Some(message))
         }
     }
@@ -325,6 +328,7 @@ impl Receiver {
     /// Simulate receiving a message (for testing purposes)
     pub fn simulate_receive(&mut self, message: Message) {
         self.message_queue.push(message);
+        self.delivery_count += 1;
     }
 }
 
@@ -454,5 +458,338 @@ impl TerminusBuilder {
 impl Default for TerminusBuilder {
     fn default() -> Self {
         Self::new()
+    }
+} 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AmqpValue, AmqpSymbol};
+
+    #[test]
+    fn test_link_state_creation() {
+        let attaching = LinkState::Attaching;
+        let attached = LinkState::Attached;
+        let detaching = LinkState::Detaching;
+        let detached = LinkState::Detached;
+        let error = LinkState::Error("test error".to_string());
+
+        assert_eq!(attaching, LinkState::Attaching);
+        assert_eq!(attached, LinkState::Attached);
+        assert_eq!(detaching, LinkState::Detaching);
+        assert_eq!(detached, LinkState::Detached);
+        assert_eq!(error, LinkState::Error("test error".to_string()));
+    }
+
+    #[test]
+    fn test_link_config_default() {
+        let config = LinkConfig::default();
+        
+        assert!(!config.name.is_empty());
+        assert_eq!(config.source, None);
+        assert_eq!(config.target, None);
+        assert_eq!(config.sender_settle_mode, SenderSettleMode::Mixed);
+        assert_eq!(config.receiver_settle_mode, ReceiverSettleMode::First);
+        assert!(config.properties.is_empty());
+        assert!(config.source_config.is_none());
+        assert!(config.target_config.is_none());
+    }
+
+    #[test]
+    fn test_link_config_custom() {
+        let mut config = LinkConfig::default();
+        config.name = "test-link".to_string();
+        config.source = Some("test-source".to_string());
+        config.target = Some("test-target".to_string());
+        config.sender_settle_mode = SenderSettleMode::Settled;
+        config.receiver_settle_mode = ReceiverSettleMode::Second;
+        
+        assert_eq!(config.name, "test-link");
+        assert_eq!(config.source, Some("test-source".to_string()));
+        assert_eq!(config.target, Some("test-target".to_string()));
+        assert_eq!(config.sender_settle_mode, SenderSettleMode::Settled);
+        assert_eq!(config.receiver_settle_mode, ReceiverSettleMode::Second);
+    }
+
+    #[test]
+    fn test_terminus_config_default() {
+        let config = TerminusConfig::default();
+        
+        assert_eq!(config.durability, TerminusDurability::None);
+        assert_eq!(config.expiry_policy, TerminusExpiryPolicy::SessionEnd);
+        assert_eq!(config.timeout, 0);
+        assert!(config.properties.is_empty());
+    }
+
+    #[test]
+    fn test_terminus_config_custom() {
+        let mut config = TerminusConfig::default();
+        config.durability = TerminusDurability::Configuration;
+        config.expiry_policy = TerminusExpiryPolicy::Never;
+        config.timeout = 5000;
+        
+        assert_eq!(config.durability, TerminusDurability::Configuration);
+        assert_eq!(config.expiry_policy, TerminusExpiryPolicy::Never);
+        assert_eq!(config.timeout, 5000);
+    }
+
+    #[test]
+    fn test_link_creation() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let link = Link::new(config.clone(), session_id.clone());
+        
+        assert_eq!(link.state(), &LinkState::Detached);
+        assert_eq!(link.session_id(), &session_id);
+        assert!(!link.id().is_empty());
+        assert_eq!(link.name(), &config.name);
+        assert_eq!(link.handle(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_link_attach_detach() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let mut link = Link::new(config, session_id);
+        
+        // Test attach
+        assert!(link.attach().await.is_ok());
+        assert_eq!(link.state(), &LinkState::Attached);
+        
+        // Test detach
+        assert!(link.detach().await.is_ok());
+        assert_eq!(link.state(), &LinkState::Detached);
+    }
+
+    #[test]
+    fn test_sender_creation() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let sender = Sender::new(config.clone(), session_id.clone());
+        
+        assert_eq!(sender.credit(), 0);
+        assert_eq!(sender.state(), &LinkState::Detached);
+        assert_eq!(sender.name(), &config.name);
+    }
+
+    #[tokio::test]
+    async fn test_sender_attach_detach() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let mut sender = Sender::new(config, session_id);
+        
+        // Test attach
+        assert!(sender.attach().await.is_ok());
+        assert_eq!(sender.state(), &LinkState::Attached);
+        
+        // Test detach
+        assert!(sender.detach().await.is_ok());
+        assert_eq!(sender.state(), &LinkState::Detached);
+    }
+
+    #[test]
+    fn test_sender_credit_management() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let mut sender = Sender::new(config, session_id);
+        
+        assert_eq!(sender.credit(), 0);
+        sender.add_credit(10);
+        assert_eq!(sender.credit(), 10);
+        sender.add_credit(5);
+        assert_eq!(sender.credit(), 15);
+    }
+
+    #[test]
+    fn test_receiver_creation() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let receiver = Receiver::new(config.clone(), session_id.clone());
+        
+        assert_eq!(receiver.credit(), 0);
+        assert_eq!(receiver.delivery_count(), 0);
+        assert_eq!(receiver.state(), &LinkState::Detached);
+        assert_eq!(receiver.name(), &config.name);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_attach_detach() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let mut receiver = Receiver::new(config, session_id);
+        
+        // Test attach
+        assert!(receiver.attach().await.is_ok());
+        assert_eq!(receiver.state(), &LinkState::Attached);
+        
+        // Test detach
+        assert!(receiver.detach().await.is_ok());
+        assert_eq!(receiver.state(), &LinkState::Detached);
+    }
+
+    #[test]
+    fn test_receiver_credit_management() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let mut receiver = Receiver::new(config, session_id);
+        
+        assert_eq!(receiver.credit(), 0);
+        receiver.add_credit(20);
+        assert_eq!(receiver.credit(), 20);
+        receiver.add_credit(10);
+        assert_eq!(receiver.credit(), 30);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_message_handling() {
+        let config = LinkConfig::default();
+        let session_id = "test-session".to_string();
+        let mut receiver = Receiver::new(config, session_id);
+        
+        // Attach the receiver first
+        receiver.attach().await.unwrap();
+        
+        // Create a test message
+        let message = Message::new();
+        
+        // Simulate receiving a message
+        receiver.simulate_receive(message.clone());
+        assert_eq!(receiver.delivery_count(), 1);
+        
+        // Test receive
+        let received = receiver.receive().await.unwrap();
+        assert!(received.is_some());
+        assert_eq!(receiver.delivery_count(), 1); // Should not change
+    }
+
+    #[test]
+    fn test_link_builder() {
+        let sender = LinkBuilder::new()
+            .name("test-sender")
+            .source("test-source")
+            .target("test-target")
+            .sender_settle_mode(SenderSettleMode::Settled)
+            .receiver_settle_mode(ReceiverSettleMode::Second)
+            .property("key1", AmqpValue::String("value1".to_string()))
+            .build_sender("test-session".to_string());
+        
+        assert_eq!(sender.name(), "test-sender");
+        assert_eq!(sender.state(), &LinkState::Detached);
+    }
+
+    #[test]
+    fn test_link_builder_with_terminus() {
+        let source_config = TerminusBuilder::new()
+            .durability(TerminusDurability::Configuration)
+            .expiry_policy(TerminusExpiryPolicy::Never)
+            .timeout(10000)
+            .property("source-key", AmqpValue::Int(42))
+            .build();
+            
+        let target_config = TerminusBuilder::new()
+            .durability(TerminusDurability::UnsettledState)
+            .expiry_policy(TerminusExpiryPolicy::ConnectionClose)
+            .timeout(5000)
+            .property("target-key", AmqpValue::String("target-value".to_string()))
+            .build();
+        
+        let receiver = LinkBuilder::new()
+            .name("test-receiver")
+            .source_config(source_config)
+            .target_config(target_config)
+            .build_receiver("test-session".to_string());
+        
+        assert_eq!(receiver.name(), "test-receiver");
+        assert_eq!(receiver.state(), &LinkState::Detached);
+    }
+
+    #[test]
+    fn test_terminus_builder() {
+        let config = TerminusBuilder::new()
+            .durability(TerminusDurability::Configuration)
+            .expiry_policy(TerminusExpiryPolicy::Never)
+            .timeout(15000)
+            .property("test-key", AmqpValue::Boolean(true))
+            .build();
+        
+        assert_eq!(config.durability, TerminusDurability::Configuration);
+        assert_eq!(config.expiry_policy, TerminusExpiryPolicy::Never);
+        assert_eq!(config.timeout, 15000);
+        assert_eq!(config.properties.len(), 1);
+        assert_eq!(config.properties.get("test-key"), Some(&AmqpValue::Boolean(true)));
+    }
+
+    #[test]
+    fn test_link_builder_default() {
+        let builder = LinkBuilder::default();
+        let sender = builder.build_sender("test-session".to_string());
+        
+        assert!(!sender.name().is_empty());
+        assert_eq!(sender.state(), &LinkState::Detached);
+    }
+
+    #[test]
+    fn test_terminus_builder_default() {
+        let builder = TerminusBuilder::default();
+        let config = builder.build();
+        
+        assert_eq!(config.durability, TerminusDurability::None);
+        assert_eq!(config.expiry_policy, TerminusExpiryPolicy::SessionEnd);
+        assert_eq!(config.timeout, 0);
+        assert!(config.properties.is_empty());
+    }
+
+    #[test]
+    fn test_link_state_clone() {
+        let state1 = LinkState::Attached;
+        let state2 = state1.clone();
+        
+        assert_eq!(state1, state2);
+    }
+
+    #[test]
+    fn test_link_config_clone() {
+        let mut config1 = LinkConfig::default();
+        config1.name = "test-link".to_string();
+        config1.source = Some("test-source".to_string());
+        
+        let config2 = config1.clone();
+        
+        assert_eq!(config1.name, config2.name);
+        assert_eq!(config1.source, config2.source);
+    }
+
+    #[test]
+    fn test_terminus_config_clone() {
+        let mut config1 = TerminusConfig::default();
+        config1.durability = TerminusDurability::Configuration;
+        config1.timeout = 5000;
+        
+        let config2 = config1.clone();
+        
+        assert_eq!(config1.durability, config2.durability);
+        assert_eq!(config1.timeout, config2.timeout);
+    }
+
+    #[test]
+    fn test_link_properties() {
+        let mut config = LinkConfig::default();
+        config.properties.insert("test-key".to_string(), AmqpValue::Int(123));
+        config.properties.insert("test-string".to_string(), AmqpValue::String("test-value".to_string()));
+        
+        assert_eq!(config.properties.len(), 2);
+        assert_eq!(config.properties.get("test-key"), Some(&AmqpValue::Int(123)));
+        assert_eq!(config.properties.get("test-string"), Some(&AmqpValue::String("test-value".to_string())));
+    }
+
+    #[test]
+    fn test_terminus_properties() {
+        let mut config = TerminusConfig::default();
+        config.properties.insert("durability-key".to_string(), AmqpValue::Symbol(AmqpSymbol::from("durability-value")));
+        config.properties.insert("timeout-key".to_string(), AmqpValue::Uint(30000));
+        
+        assert_eq!(config.properties.len(), 2);
+        assert_eq!(config.properties.get("durability-key"), Some(&AmqpValue::Symbol(AmqpSymbol::from("durability-value"))));
+        assert_eq!(config.properties.get("timeout-key"), Some(&AmqpValue::Uint(30000)));
     }
 } 

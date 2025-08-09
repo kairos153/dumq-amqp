@@ -116,9 +116,9 @@ impl Default for ConnectionConfig {
             port: 5672,
             timeout: Duration::from_secs(30),
             max_frame_size: 65536,
-            channel_max: 0,
+            channel_max: 1000,
             idle_timeout: Duration::from_secs(0),
-            container_id: Uuid::new_v4().to_string(),
+            container_id: "dumq-amqp-client".to_string(),
             properties: HashMap::new(),
         }
     }
@@ -430,5 +430,376 @@ impl SessionBuilder {
     /// Build the session
     pub fn build(self, connection_id: String) -> Session {
         Session::new(self.channel, connection_id)
+    }
+} 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::AmqpValue;
+
+    #[test]
+    fn test_connection_state_creation() {
+        let opening = ConnectionState::Opening;
+        let open = ConnectionState::Open;
+        let closing = ConnectionState::Closing;
+        let closed = ConnectionState::Closed;
+        let error = ConnectionState::Error("test error".to_string());
+
+        assert!(matches!(opening, ConnectionState::Opening));
+        assert!(matches!(open, ConnectionState::Open));
+        assert!(matches!(closing, ConnectionState::Closing));
+        assert!(matches!(closed, ConnectionState::Closed));
+        assert!(matches!(error, ConnectionState::Error(_)));
+    }
+
+    #[test]
+    fn test_connection_state_clone() {
+        let state = ConnectionState::Open;
+        let cloned = state.clone();
+        
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn test_connection_state_equality() {
+        let state1 = ConnectionState::Open;
+        let state2 = ConnectionState::Open;
+        let state3 = ConnectionState::Closed;
+        
+        assert_eq!(state1, state2);
+        assert_ne!(state1, state3);
+        
+        let error1 = ConnectionState::Error("error1".to_string());
+        let error2 = ConnectionState::Error("error1".to_string());
+        let error3 = ConnectionState::Error("error2".to_string());
+        
+        assert_eq!(error1, error2);
+        assert_ne!(error1, error3);
+    }
+
+    #[test]
+    fn test_connection_config_default() {
+        let config = ConnectionConfig::default();
+        
+        assert_eq!(config.hostname, "localhost");
+        assert_eq!(config.port, 5672);
+        assert_eq!(config.timeout, Duration::from_secs(30));
+        assert_eq!(config.max_frame_size, 65536);
+        assert_eq!(config.channel_max, 1000);
+        assert_eq!(config.idle_timeout, Duration::from_secs(0));
+        assert_eq!(config.container_id, "dumq-amqp-client");
+        assert!(config.properties.is_empty());
+    }
+
+    #[test]
+    fn test_connection_config_clone() {
+        let mut config = ConnectionConfig::default();
+        config.hostname = "test-host".to_string();
+        config.port = 5673;
+        
+        let cloned = config.clone();
+        
+        assert_eq!(cloned.hostname, "test-host");
+        assert_eq!(cloned.port, 5673);
+        assert_eq!(cloned.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_connection_builder_new() {
+        let builder = ConnectionBuilder::new();
+        let connection = builder.build();
+        
+        assert_eq!(connection.state(), &ConnectionState::Closed);
+        assert!(!connection.id().is_empty());
+        assert_eq!(connection.config.hostname, "localhost");
+        assert_eq!(connection.config.port, 5672);
+    }
+
+    #[test]
+    fn test_connection_builder_hostname() {
+        let connection = ConnectionBuilder::new()
+            .hostname("test-host")
+            .build();
+        
+        assert_eq!(connection.config.hostname, "test-host");
+    }
+
+    #[test]
+    fn test_connection_builder_port() {
+        let connection = ConnectionBuilder::new()
+            .port(5673)
+            .build();
+        
+        assert_eq!(connection.config.port, 5673);
+    }
+
+    #[test]
+    fn test_connection_builder_timeout() {
+        let timeout = Duration::from_secs(60);
+        let connection = ConnectionBuilder::new()
+            .timeout(timeout)
+            .build();
+        
+        assert_eq!(connection.config.timeout, timeout);
+    }
+
+    #[test]
+    fn test_connection_builder_max_frame_size() {
+        let connection = ConnectionBuilder::new()
+            .max_frame_size(131072)
+            .build();
+        
+        assert_eq!(connection.config.max_frame_size, 131072);
+    }
+
+    #[test]
+    fn test_connection_builder_channel_max() {
+        let connection = ConnectionBuilder::new()
+            .channel_max(500)
+            .build();
+        
+        assert_eq!(connection.config.channel_max, 500);
+    }
+
+    #[test]
+    fn test_connection_builder_idle_timeout() {
+        let idle_timeout = Duration::from_secs(120);
+        let connection = ConnectionBuilder::new()
+            .idle_timeout(idle_timeout)
+            .build();
+        
+        assert_eq!(connection.config.idle_timeout, idle_timeout);
+    }
+
+    #[test]
+    fn test_connection_builder_container_id() {
+        let connection = ConnectionBuilder::new()
+            .container_id("test-container")
+            .build();
+        
+        assert_eq!(connection.config.container_id, "test-container");
+    }
+
+    #[test]
+    fn test_connection_builder_property() {
+        let connection = ConnectionBuilder::new()
+            .property("test-key", AmqpValue::String("test-value".to_string()))
+            .property("number-key", AmqpValue::Int(42))
+            .build();
+        
+        assert_eq!(connection.config.properties.len(), 2);
+        assert_eq!(
+            connection.config.properties.get("test-key"),
+            Some(&AmqpValue::String("test-value".to_string()))
+        );
+        assert_eq!(
+            connection.config.properties.get("number-key"),
+            Some(&AmqpValue::Int(42))
+        );
+    }
+
+    #[test]
+    fn test_connection_builder_default() {
+        let builder = ConnectionBuilder::default();
+        let connection = builder.build();
+        
+        assert_eq!(connection.config.hostname, "localhost");
+        assert_eq!(connection.config.port, 5672);
+        assert_eq!(connection.config.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_connection_creation() {
+        let config = ConnectionConfig::default();
+        let connection = Connection::new(config);
+        
+        assert_eq!(connection.state(), &ConnectionState::Closed);
+        assert!(!connection.id().is_empty());
+        assert_eq!(connection.next_channel, 0);
+        assert!(connection.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_connection_id_generation() {
+        let config = ConnectionConfig::default();
+        let connection1 = Connection::new(config.clone());
+        let connection2 = Connection::new(config);
+        
+        // IDs should be unique
+        assert_ne!(connection1.id(), connection2.id());
+        
+        // IDs should not be empty
+        assert!(!connection1.id().is_empty());
+        assert!(!connection2.id().is_empty());
+    }
+
+    #[test]
+    fn test_session_creation() {
+        let session = Session::new(1, "test-connection".to_string());
+        
+        assert_eq!(session.channel(), 1);
+        assert_eq!(session.id(), "test-connection-session-1");
+        assert_eq!(session.state(), &SessionState::Closed);
+    }
+
+    #[test]
+    fn test_session_state_creation() {
+        let opening = SessionState::Opening;
+        let open = SessionState::Open;
+        let closing = SessionState::Closing;
+        let closed = SessionState::Closed;
+        let error = SessionState::Error("session error".to_string());
+
+        assert!(matches!(opening, SessionState::Opening));
+        assert!(matches!(open, SessionState::Open));
+        assert!(matches!(closing, SessionState::Closing));
+        assert!(matches!(closed, SessionState::Closed));
+        assert!(matches!(error, SessionState::Error(_)));
+    }
+
+    #[test]
+    fn test_session_state_clone() {
+        let state = SessionState::Open;
+        let cloned = state.clone();
+        
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn test_session_state_equality() {
+        let state1 = SessionState::Open;
+        let state2 = SessionState::Open;
+        let state3 = SessionState::Closed;
+        
+        assert_eq!(state1, state2);
+        assert_ne!(state1, state3);
+        
+        let error1 = SessionState::Error("error1".to_string());
+        let error2 = SessionState::Error("error1".to_string());
+        let error3 = SessionState::Error("error2".to_string());
+        
+        assert_eq!(error1, error2);
+        assert_ne!(error1, error3);
+    }
+
+    #[test]
+    fn test_session_builder_new() {
+        let builder = SessionBuilder::new(5);
+        assert_eq!(builder.channel, 5);
+    }
+
+    #[test]
+    fn test_session_builder_build() {
+        let builder = SessionBuilder::new(3);
+        let session = builder.build("test-connection".to_string());
+        
+        assert_eq!(session.channel(), 3);
+        assert_eq!(session.id(), "test-connection-session-3");
+        assert_eq!(session.state(), &SessionState::Closed);
+    }
+
+    #[test]
+    fn test_connection_create_session() {
+        let config = ConnectionConfig::default();
+        let connection = Connection::new(config);
+        
+        // This should fail because connection is not open
+        // Note: create_session is async, so we can't test the actual error in a sync test
+        // In a real async test, we would await the result
+        assert_eq!(connection.state(), &ConnectionState::Closed);
+    }
+
+    #[test]
+    fn test_connection_state_transitions() {
+        let config = ConnectionConfig::default();
+        let connection = Connection::new(config);
+        
+        // Initial state should be Closed
+        assert_eq!(connection.state(), &ConnectionState::Closed);
+        
+        // State should be accessible
+        let state = connection.state();
+        assert_eq!(state, &ConnectionState::Closed);
+    }
+
+    #[test]
+    fn test_connection_id_access() {
+        let config = ConnectionConfig::default();
+        let connection = Connection::new(config);
+        
+        let id = connection.id();
+        assert!(!id.is_empty());
+        
+        // ID should be consistent
+        assert_eq!(connection.id(), id);
+    }
+
+    #[test]
+    fn test_connection_with_custom_config() {
+        let mut config = ConnectionConfig::default();
+        config.hostname = "custom-host".to_string();
+        config.port = 8888;
+        config.timeout = Duration::from_secs(60);
+        config.max_frame_size = 131072;
+        config.channel_max = 500;
+        config.idle_timeout = Duration::from_secs(120);
+        config.container_id = "custom-container".to_string();
+        
+        let connection = Connection::new(config);
+        
+        assert_eq!(connection.config.hostname, "custom-host");
+        assert_eq!(connection.config.port, 8888);
+        assert_eq!(connection.config.timeout, Duration::from_secs(60));
+        assert_eq!(connection.config.max_frame_size, 131072);
+        assert_eq!(connection.config.channel_max, 500);
+        assert_eq!(connection.config.idle_timeout, Duration::from_secs(120));
+        assert_eq!(connection.config.container_id, "custom-container");
+    }
+
+    #[test]
+    fn test_connection_builder_fluent_api() {
+        let connection = ConnectionBuilder::new()
+            .hostname("fluent-host")
+            .port(9999)
+            .timeout(Duration::from_secs(45))
+            .max_frame_size(262144)
+            .channel_max(750)
+            .idle_timeout(Duration::from_secs(90))
+            .container_id("fluent-container")
+            .property("version", AmqpValue::String("1.0".to_string()))
+            .property("debug", AmqpValue::Boolean(true))
+            .build();
+        
+        assert_eq!(connection.config.hostname, "fluent-host");
+        assert_eq!(connection.config.port, 9999);
+        assert_eq!(connection.config.timeout, Duration::from_secs(45));
+        assert_eq!(connection.config.max_frame_size, 262144);
+        assert_eq!(connection.config.channel_max, 750);
+        assert_eq!(connection.config.idle_timeout, Duration::from_secs(90));
+        assert_eq!(connection.config.container_id, "fluent-container");
+        assert_eq!(connection.config.properties.len(), 2);
+    }
+
+    #[test]
+    fn test_session_methods() {
+        let session = Session::new(10, "test-connection".to_string());
+        
+        // Test initial state
+        assert_eq!(session.channel(), 10);
+        assert_eq!(session.id(), "test-connection-session-10");
+        assert_eq!(session.state(), &SessionState::Closed);
+        
+        // Test state access
+        let state = session.state();
+        assert_eq!(state, &SessionState::Closed);
+        
+        // Test ID access
+        let id = session.id();
+        assert_eq!(id, "test-connection-session-10");
+        
+        // Test channel access
+        let channel = session.channel();
+        assert_eq!(channel, 10);
     }
 } 

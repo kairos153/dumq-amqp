@@ -289,7 +289,12 @@ impl Encoder {
     /// Encode char
     pub fn encode_char(&mut self, value: char) -> Result<(), AmqpError> {
         self.buffer.put_u8(TypeCode::Char as u8);
-        self.buffer.put_u32(value as u32);
+        // UTF-32 big-endian encoding: put the character as 4 bytes in big-endian order
+        let char_u32 = value as u32;
+        self.buffer.put_u8((char_u32 >> 24) as u8);
+        self.buffer.put_u8((char_u32 >> 16) as u8);
+        self.buffer.put_u8((char_u32 >> 8) as u8);
+        self.buffer.put_u8(char_u32 as u8);
         Ok(())
     }
 
@@ -999,5 +1004,659 @@ impl Decoder {
         }
 
         Ok(message)
+    }
+} 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AmqpList, AmqpMap, AmqpSymbol};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_type_code_values() {
+        assert_eq!(TypeCode::Described as u8, 0x00);
+        assert_eq!(TypeCode::Null as u8, 0x40);
+        assert_eq!(TypeCode::Boolean as u8, 0x56);
+        assert_eq!(TypeCode::BooleanTrue as u8, 0x41);
+        assert_eq!(TypeCode::BooleanFalse as u8, 0x42);
+        assert_eq!(TypeCode::Ubyte as u8, 0x50);
+        assert_eq!(TypeCode::Ushort as u8, 0x60);
+        assert_eq!(TypeCode::Uint as u8, 0x70);
+        assert_eq!(TypeCode::Ulong as u8, 0x80);
+        assert_eq!(TypeCode::Byte as u8, 0x51);
+        assert_eq!(TypeCode::Short as u8, 0x61);
+        assert_eq!(TypeCode::Int as u8, 0x71);
+        assert_eq!(TypeCode::Long as u8, 0x81);
+        assert_eq!(TypeCode::Float as u8, 0x72);
+        assert_eq!(TypeCode::Double as u8, 0x82);
+        assert_eq!(TypeCode::Decimal32 as u8, 0x74);
+        assert_eq!(TypeCode::Decimal64 as u8, 0x84);
+        assert_eq!(TypeCode::Decimal128 as u8, 0x94);
+        assert_eq!(TypeCode::Char as u8, 0x73);
+        assert_eq!(TypeCode::Timestamp as u8, 0x83);
+        assert_eq!(TypeCode::Uuid as u8, 0x98);
+        assert_eq!(TypeCode::Binary8 as u8, 0xa0);
+        assert_eq!(TypeCode::Binary32 as u8, 0xb0);
+        assert_eq!(TypeCode::String8 as u8, 0xa1);
+        assert_eq!(TypeCode::String32 as u8, 0xb1);
+        assert_eq!(TypeCode::Symbol8 as u8, 0xa3);
+        assert_eq!(TypeCode::Symbol32 as u8, 0xb3);
+        assert_eq!(TypeCode::List0 as u8, 0x45);
+        assert_eq!(TypeCode::List8 as u8, 0xc0);
+        assert_eq!(TypeCode::List32 as u8, 0xd0);
+        assert_eq!(TypeCode::Map8 as u8, 0xc1);
+        assert_eq!(TypeCode::Map32 as u8, 0xd1);
+        assert_eq!(TypeCode::Array8 as u8, 0xe0);
+        assert_eq!(TypeCode::Array32 as u8, 0xf0);
+    }
+
+    #[test]
+    fn test_encoder_creation() {
+        let encoder = Encoder::new();
+        assert_eq!(encoder.buffer.len(), 0);
+        
+        let encoder_with_capacity = Encoder::with_capacity(1024);
+        assert_eq!(encoder_with_capacity.buffer.capacity(), 1024);
+    }
+
+    #[test]
+    fn test_encoder_default() {
+        let encoder = Encoder::default();
+        assert_eq!(encoder.buffer.len(), 0);
+    }
+
+    #[test]
+    fn test_encoder_encode_null() {
+        let mut encoder = Encoder::new();
+        encoder.encode_null().unwrap();
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Null as u8);
+    }
+
+    #[test]
+    fn test_encoder_encode_boolean() {
+        let mut encoder = Encoder::new();
+        
+        encoder.encode_boolean(true).unwrap();
+        encoder.encode_boolean(false).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::BooleanTrue as u8);
+        assert_eq!(result[1], TypeCode::BooleanFalse as u8);
+    }
+
+    #[test]
+    fn test_encoder_encode_ubyte() {
+        let mut encoder = Encoder::new();
+        encoder.encode_ubyte(42).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Ubyte as u8);
+        assert_eq!(result[1], 42);
+    }
+
+    #[test]
+    fn test_encoder_encode_ushort() {
+        let mut encoder = Encoder::new();
+        encoder.encode_ushort(12345).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Ushort as u8);
+        // Note: bytes are stored in big-endian order
+        assert_eq!(result[1], 0x30);
+        assert_eq!(result[2], 0x39);
+    }
+
+    #[test]
+    fn test_encoder_encode_uint() {
+        let mut encoder = Encoder::new();
+        encoder.encode_uint(123456789).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Uint as u8);
+        // Big-endian encoding
+        assert_eq!(result[1], 0x07);
+        assert_eq!(result[2], 0x5b);
+        assert_eq!(result[3], 0xcd);
+        assert_eq!(result[4], 0x15);
+    }
+
+    #[test]
+    fn test_encoder_encode_ulong() {
+        let mut encoder = Encoder::new();
+        encoder.encode_ulong(1234567890123456789).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Ulong as u8);
+        assert_eq!(result.len(), 9); // 1 byte type + 8 bytes value
+    }
+
+    #[test]
+    fn test_encoder_encode_byte() {
+        let mut encoder = Encoder::new();
+        encoder.encode_byte(-42).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Byte as u8);
+        assert_eq!(result[1], 0xd6); // -42 as signed byte
+    }
+
+    #[test]
+    fn test_encoder_encode_short() {
+        let mut encoder = Encoder::new();
+        encoder.encode_short(-12345).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Short as u8);
+        assert_eq!(result.len(), 3); // 1 byte type + 2 bytes value
+    }
+
+    #[test]
+    fn test_encoder_encode_int() {
+        let mut encoder = Encoder::new();
+        encoder.encode_int(-123456789).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Int as u8);
+        assert_eq!(result.len(), 5); // 1 byte type + 4 bytes value
+    }
+
+    #[test]
+    fn test_encoder_encode_long() {
+        let mut encoder = Encoder::new();
+        encoder.encode_long(-1234567890123456789).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Long as u8);
+        assert_eq!(result.len(), 9); // 1 byte type + 8 bytes value
+    }
+
+    #[test]
+    fn test_encoder_encode_float() {
+        let mut encoder = Encoder::new();
+        encoder.encode_float(3.14159).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Float as u8);
+        assert_eq!(result.len(), 5); // 1 byte type + 4 bytes value
+    }
+
+    #[test]
+    fn test_encoder_encode_double() {
+        let mut encoder = Encoder::new();
+        encoder.encode_double(3.14159265359).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Double as u8);
+        assert_eq!(result.len(), 9); // 1 byte type + 8 bytes value
+    }
+
+    #[test]
+    fn test_encoder_encode_char() {
+        let mut encoder = Encoder::new();
+        encoder.encode_char('A').unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Char as u8);
+        // UTF-32 big-endian encoding: 'A' (0x41) is the last byte
+        assert_eq!(result[1], 0x00);
+        assert_eq!(result[2], 0x00);
+        assert_eq!(result[3], 0x00);
+        assert_eq!(result[4], 0x41); // 'A' in UTF-32
+        assert_eq!(result.len(), 5); // 1 byte type + 4 bytes UTF-32
+    }
+
+    #[test]
+    fn test_encoder_encode_timestamp() {
+        let mut encoder = Encoder::new();
+        let timestamp = 1234567890;
+        encoder.encode_timestamp(timestamp).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Timestamp as u8);
+        assert_eq!(result.len(), 9); // 1 byte type + 8 bytes value
+    }
+
+    #[test]
+    fn test_encoder_encode_uuid() {
+        let mut encoder = Encoder::new();
+        let uuid = Uuid::new_v4();
+        encoder.encode_uuid(uuid).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Uuid as u8);
+        assert_eq!(result.len(), 17); // 1 byte type + 16 bytes UUID
+    }
+
+    #[test]
+    fn test_encoder_encode_binary() {
+        let mut encoder = Encoder::new();
+        let data = vec![1, 2, 3, 4, 5];
+        encoder.encode_binary(&data).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Binary8 as u8);
+        assert_eq!(result[1], 5); // length
+        assert_eq!(&result[2..7], &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_encoder_encode_string() {
+        let mut encoder = Encoder::new();
+        let text = "Hello, AMQP!";
+        encoder.encode_string(text).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::String8 as u8);
+        assert_eq!(result[1], 12); // length
+        assert_eq!(&result[2..14], b"Hello, AMQP!");
+    }
+
+    #[test]
+    fn test_encoder_encode_symbol() {
+        let mut encoder = Encoder::new();
+        let symbol = AmqpSymbol::from("test-symbol");
+        encoder.encode_symbol(&symbol).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Symbol8 as u8);
+        assert_eq!(result[1], 11); // length
+        assert_eq!(&result[2..13], b"test-symbol");
+    }
+
+    #[test]
+    fn test_encoder_encode_list() {
+        let mut encoder = Encoder::new();
+        let list = AmqpList::from(vec![
+            AmqpValue::String("item1".to_string()),
+            AmqpValue::Int(42),
+            AmqpValue::Boolean(true),
+        ]);
+        encoder.encode_value(&AmqpValue::List(list)).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::List8 as u8);
+        assert!(result.len() > 3); // Should contain the list data
+    }
+
+    #[test]
+    fn test_encoder_encode_map() {
+        let mut encoder = Encoder::new();
+        let mut map_data = HashMap::new();
+        map_data.insert(AmqpSymbol::from("key1"), AmqpValue::String("value1".to_string()));
+        map_data.insert(AmqpSymbol::from("key2"), AmqpValue::Int(42));
+        let map = AmqpMap::from(map_data);
+        encoder.encode_value(&AmqpValue::Map(map)).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Map8 as u8);
+        assert!(result.len() > 3); // Should contain the map data
+    }
+
+    #[test]
+    fn test_encoder_encode_array() {
+        let mut encoder = Encoder::new();
+        let array = vec![
+            AmqpValue::String("item1".to_string()),
+            AmqpValue::Int(42),
+            AmqpValue::Boolean(true),
+        ];
+        encoder.encode_array(&array).unwrap();
+        
+        let result = encoder.finish();
+        assert_eq!(result[0], TypeCode::Array8 as u8);
+        assert!(result.len() > 3); // Should contain the array data
+    }
+
+    #[test]
+    fn test_decoder_creation() {
+        let data = vec![1, 2, 3, 4];
+        let decoder = Decoder::new(data.clone());
+        assert_eq!(decoder.buffer.len(), 4);
+        assert_eq!(decoder.remaining(), 4);
+        assert!(decoder.has_remaining());
+    }
+
+    #[test]
+    fn test_decoder_has_remaining() {
+        let decoder = Decoder::new(vec![1, 2, 3]);
+        assert!(decoder.has_remaining());
+        
+        let empty_decoder = Decoder::new(vec![]);
+        assert!(!empty_decoder.has_remaining());
+    }
+
+    #[test]
+    fn test_decoder_remaining() {
+        let decoder = Decoder::new(vec![1, 2, 3, 4, 5]);
+        assert_eq!(decoder.remaining(), 5);
+    }
+
+    #[test]
+    fn test_decoder_decode_null() {
+        let mut encoder = Encoder::new();
+        encoder.encode_null().unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Null));
+    }
+
+    #[test]
+    fn test_decoder_decode_boolean() {
+        let mut encoder = Encoder::new();
+        encoder.encode_boolean(true).unwrap();
+        encoder.encode_boolean(false).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded1 = decoder.decode_value().unwrap();
+        let decoded2 = decoder.decode_value().unwrap();
+        
+        assert!(matches!(decoded1, AmqpValue::Boolean(true)));
+        assert!(matches!(decoded2, AmqpValue::Boolean(false)));
+    }
+
+    #[test]
+    fn test_decoder_decode_ubyte() {
+        let mut encoder = Encoder::new();
+        encoder.encode_ubyte(42).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Ubyte(42)));
+    }
+
+    #[test]
+    fn test_decoder_decode_ushort() {
+        let mut encoder = Encoder::new();
+        encoder.encode_ushort(12345).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Ushort(12345)));
+    }
+
+    #[test]
+    fn test_decoder_decode_uint() {
+        let mut encoder = Encoder::new();
+        encoder.encode_uint(123456789).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Uint(123456789)));
+    }
+
+    #[test]
+    fn test_decoder_decode_ulong() {
+        let mut encoder = Encoder::new();
+        encoder.encode_ulong(1234567890123456789).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Ulong(1234567890123456789)));
+    }
+
+    #[test]
+    fn test_decoder_decode_byte() {
+        let mut encoder = Encoder::new();
+        encoder.encode_byte(-42).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Byte(-42)));
+    }
+
+    #[test]
+    fn test_decoder_decode_short() {
+        let mut encoder = Encoder::new();
+        encoder.encode_short(-12345).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Short(-12345)));
+    }
+
+    #[test]
+    fn test_decoder_decode_int() {
+        let mut encoder = Encoder::new();
+        encoder.encode_int(-123456789).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Int(-123456789)));
+    }
+
+    #[test]
+    fn test_decoder_decode_long() {
+        let mut encoder = Encoder::new();
+        encoder.encode_long(-1234567890123456789).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Long(-1234567890123456789)));
+    }
+
+    #[test]
+    fn test_decoder_decode_float() {
+        let mut encoder = Encoder::new();
+        encoder.encode_float(3.14159).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Float(f) if (f - 3.14159).abs() < 0.0001));
+    }
+
+    #[test]
+    fn test_decoder_decode_double() {
+        let mut encoder = Encoder::new();
+        encoder.encode_double(3.14159265359).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Double(d) if (d - 3.14159265359).abs() < 0.00000000001));
+    }
+
+    #[test]
+    fn test_decoder_decode_char() {
+        let mut encoder = Encoder::new();
+        encoder.encode_char('A').unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Char('A')));
+    }
+
+    #[test]
+    fn test_decoder_decode_timestamp() {
+        let mut encoder = Encoder::new();
+        let timestamp = 1234567890;
+        encoder.encode_timestamp(timestamp).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Timestamp(ts) if ts == timestamp));
+    }
+
+    #[test]
+    fn test_decoder_decode_uuid() {
+        let mut encoder = Encoder::new();
+        let uuid = Uuid::new_v4();
+        encoder.encode_uuid(uuid).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Uuid(u) if u == uuid));
+    }
+
+    #[test]
+    fn test_decoder_decode_binary() {
+        let mut encoder = Encoder::new();
+        let data = vec![1, 2, 3, 4, 5];
+        encoder.encode_binary(&data).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Binary(b) if b == data));
+    }
+
+    #[test]
+    fn test_decoder_decode_string() {
+        let mut encoder = Encoder::new();
+        let text = "Hello, AMQP!";
+        encoder.encode_string(text).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::String(s) if s == text));
+    }
+
+    #[test]
+    fn test_decoder_decode_symbol() {
+        let mut encoder = Encoder::new();
+        let symbol = AmqpSymbol::from("test-symbol");
+        encoder.encode_symbol(&symbol).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Symbol(s) if s == symbol));
+    }
+
+    #[test]
+    fn test_decoder_decode_list() {
+        let mut encoder = Encoder::new();
+        let list = AmqpList::from(vec![
+            AmqpValue::String("item1".to_string()),
+            AmqpValue::Int(42),
+            AmqpValue::Boolean(true),
+        ]);
+        encoder.encode_value(&AmqpValue::List(list.clone())).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::List(l) if l == list));
+    }
+
+    #[test]
+    fn test_decoder_decode_map() {
+        let mut encoder = Encoder::new();
+        let mut map_data = HashMap::new();
+        map_data.insert(AmqpSymbol::from("key1"), AmqpValue::String("value1".to_string()));
+        map_data.insert(AmqpSymbol::from("key2"), AmqpValue::Int(42));
+        let map = AmqpMap::from(map_data);
+        encoder.encode_value(&AmqpValue::Map(map.clone())).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Map(m) if m == map));
+    }
+
+    #[test]
+    fn test_decoder_decode_array() {
+        let mut encoder = Encoder::new();
+        let array = vec![
+            AmqpValue::String("item1".to_string()),
+            AmqpValue::Int(42),
+            AmqpValue::Boolean(true),
+        ];
+        encoder.encode_array(&array).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_value().unwrap();
+        assert!(matches!(decoded, AmqpValue::Array(a) if a == array));
+    }
+
+    #[test]
+    fn test_round_trip_encoding() {
+        let test_values = vec![
+            AmqpValue::Null,
+            AmqpValue::Boolean(true),
+            AmqpValue::Boolean(false),
+            AmqpValue::Ubyte(42),
+            AmqpValue::Ushort(12345),
+            AmqpValue::Uint(123456789),
+            AmqpValue::Ulong(1234567890123456789),
+            AmqpValue::Byte(-42),
+            AmqpValue::Short(-12345),
+            AmqpValue::Int(-123456789),
+            AmqpValue::Long(-1234567890123456789),
+            AmqpValue::Float(3.14159),
+            AmqpValue::Double(3.14159265359),
+            AmqpValue::Char('A'),
+            AmqpValue::Timestamp(1234567890),
+            AmqpValue::Uuid(Uuid::new_v4()),
+            AmqpValue::Binary(vec![1, 2, 3, 4, 5]),
+            AmqpValue::String("Hello, AMQP!".to_string()),
+            AmqpValue::Symbol(AmqpSymbol::from("test-symbol")),
+        ];
+
+        for value in test_values {
+            let mut encoder = Encoder::new();
+            encoder.encode_value(&value).unwrap();
+            let encoded = encoder.finish();
+            
+            let mut decoder = Decoder::new(encoded);
+            let decoded = decoder.decode_value().unwrap();
+            
+            assert_eq!(value, decoded);
+        }
+    }
+
+    #[test]
+    fn test_decoder_decode_symbol_method() {
+        let mut encoder = Encoder::new();
+        let symbol = AmqpSymbol::from("test-symbol");
+        encoder.encode_symbol(&symbol).unwrap();
+        let encoded = encoder.finish();
+        
+        let mut decoder = Decoder::new(encoded);
+        let decoded = decoder.decode_symbol().unwrap();
+        assert_eq!(decoded, symbol);
+    }
+
+    #[test]
+    fn test_encoder_finish() {
+        let mut encoder = Encoder::new();
+        encoder.encode_ubyte(42).unwrap();
+        encoder.encode_string("test").unwrap();
+        
+        let result = encoder.finish();
+        assert!(!result.is_empty());
+        assert_eq!(result[0], TypeCode::Ubyte as u8);
+        assert_eq!(result[1], 42);
+        assert_eq!(result[2], TypeCode::String8 as u8);
+    }
+
+    #[test]
+    fn test_encoder_with_capacity() {
+        let mut encoder = Encoder::with_capacity(1024);
+        assert_eq!(encoder.buffer.capacity(), 1024);
+        
+        // Add some data
+        encoder.encode_string("test string").unwrap();
+        let result = encoder.finish();
+        assert!(!result.is_empty());
     }
 } 

@@ -460,34 +460,345 @@ impl Default for NetworkBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::AmqpValue;
+    use std::time::Duration;
+
+    #[test]
+    fn test_network_state_creation() {
+        let disconnected = NetworkState::Disconnected;
+        let connecting = NetworkState::Connecting;
+        let connected = NetworkState::Connected;
+        let ready = NetworkState::Ready;
+        let closing = NetworkState::Closing;
+        let closed = NetworkState::Closed;
+        let error = NetworkState::Error("test error".to_string());
+
+        assert!(matches!(disconnected, NetworkState::Disconnected));
+        assert!(matches!(connecting, NetworkState::Connecting));
+        assert!(matches!(connected, NetworkState::Connected));
+        assert!(matches!(ready, NetworkState::Ready));
+        assert!(matches!(closing, NetworkState::Closing));
+        assert!(matches!(closed, NetworkState::Closed));
+        assert!(matches!(error, NetworkState::Error(_)));
+    }
+
+    #[test]
+    fn test_network_state_clone() {
+        let state = NetworkState::Ready;
+        let cloned = state.clone();
+        
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn test_network_state_equality() {
+        let state1 = NetworkState::Ready;
+        let state2 = NetworkState::Ready;
+        let state3 = NetworkState::Connected;
+        
+        assert_eq!(state1, state2);
+        assert_ne!(state1, state3);
+        
+        let error1 = NetworkState::Error("error1".to_string());
+        let error2 = NetworkState::Error("error1".to_string());
+        let error3 = NetworkState::Error("error2".to_string());
+        
+        assert_eq!(error1, error2);
+        assert_ne!(error1, error3);
+    }
 
     #[test]
     fn test_network_config_default() {
         let config = NetworkConfig::default();
+        
         assert_eq!(config.hostname, "localhost");
         assert_eq!(config.port, 5672);
-        assert!(!config.container_id.is_empty());
+        assert_eq!(config.timeout, Duration::from_secs(30));
+        assert_eq!(config.keep_alive, Duration::from_secs(60));
+        assert_eq!(config.max_frame_size, 65536);
+        assert_eq!(config.channel_max, 1000);
+        assert_eq!(config.idle_timeout, Duration::from_secs(60));
+        assert!(config.container_id.starts_with("dumq-amqp-"));
+        assert!(config.properties.is_empty());
     }
 
     #[test]
-    fn test_network_builder() {
+    fn test_network_config_clone() {
+        let mut config = NetworkConfig::default();
+        config.hostname = "test-host".to_string();
+        config.port = 5673;
+        
+        let cloned = config.clone();
+        
+        assert_eq!(cloned.hostname, "test-host");
+        assert_eq!(cloned.port, 5673);
+        assert_eq!(cloned.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_network_builder_new() {
+        let builder = NetworkBuilder::new();
+        let connection = builder.build();
+        
+        assert_eq!(connection.state(), &NetworkState::Disconnected);
+        assert!(!connection.id().is_empty());
+        assert_eq!(connection.config.hostname, "localhost");
+        assert_eq!(connection.config.port, 5672);
+    }
+
+    #[test]
+    fn test_network_builder_hostname() {
         let connection = NetworkBuilder::new()
-            .hostname("test.example.com")
+            .hostname("test-host")
+            .build();
+        
+        assert_eq!(connection.config.hostname, "test-host");
+    }
+
+    #[test]
+    fn test_network_builder_port() {
+        let connection = NetworkBuilder::new()
             .port(5673)
-            .timeout(Duration::from_secs(60))
+            .build();
+        
+        assert_eq!(connection.config.port, 5673);
+    }
+
+    #[test]
+    fn test_network_builder_timeout() {
+        let timeout = Duration::from_secs(60);
+        let connection = NetworkBuilder::new()
+            .timeout(timeout)
+            .build();
+        
+        assert_eq!(connection.config.timeout, timeout);
+    }
+
+    #[test]
+    fn test_network_builder_keep_alive() {
+        let keep_alive = Duration::from_secs(120);
+        let connection = NetworkBuilder::new()
+            .keep_alive(keep_alive)
+            .build();
+        
+        assert_eq!(connection.config.keep_alive, keep_alive);
+    }
+
+    #[test]
+    fn test_network_builder_max_frame_size() {
+        let connection = NetworkBuilder::new()
+            .max_frame_size(131072)
+            .build();
+        
+        assert_eq!(connection.config.max_frame_size, 131072);
+    }
+
+    #[test]
+    fn test_network_builder_channel_max() {
+        let connection = NetworkBuilder::new()
+            .channel_max(500)
+            .build();
+        
+        assert_eq!(connection.config.channel_max, 500);
+    }
+
+    #[test]
+    fn test_network_builder_idle_timeout() {
+        let idle_timeout = Duration::from_secs(120);
+        let connection = NetworkBuilder::new()
+            .idle_timeout(idle_timeout)
+            .build();
+        
+        assert_eq!(connection.config.idle_timeout, idle_timeout);
+    }
+
+    #[test]
+    fn test_network_builder_container_id() {
+        let connection = NetworkBuilder::new()
             .container_id("test-container")
             .build();
-
-        assert_eq!(connection.state(), &NetworkState::Disconnected);
-        assert_eq!(connection.config.hostname, "test.example.com");
-        assert_eq!(connection.config.port, 5673);
+        
         assert_eq!(connection.config.container_id, "test-container");
     }
 
     #[test]
-    fn test_network_connection_id() {
-        let connection = NetworkConnection::new(NetworkConfig::default());
+    fn test_network_builder_property() {
+        let connection = NetworkBuilder::new()
+            .property("test-key", AmqpValue::String("test-value".to_string()))
+            .property("number-key", AmqpValue::Int(42))
+            .build();
+        
+        assert_eq!(connection.config.properties.len(), 2);
+        assert_eq!(
+            connection.config.properties.get("test-key"),
+            Some(&AmqpValue::String("test-value".to_string()))
+        );
+        assert_eq!(
+            connection.config.properties.get("number-key"),
+            Some(&AmqpValue::Int(42))
+        );
+    }
+
+    #[test]
+    fn test_network_builder_default() {
+        let builder = NetworkBuilder::default();
+        let connection = builder.build();
+        
+        assert_eq!(connection.config.hostname, "localhost");
+        assert_eq!(connection.config.port, 5672);
+        assert_eq!(connection.config.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_network_connection_creation() {
+        let config = NetworkConfig::default();
+        let connection = NetworkConnection::new(config);
+        
+        assert_eq!(connection.state(), &NetworkState::Disconnected);
         assert!(!connection.id().is_empty());
-        assert!(connection.id().starts_with("conn-"));
+        assert_eq!(connection.next_channel, 0);
+        assert!(connection.transport.is_none());
+        assert!(connection.keep_alive_handle.is_none());
+    }
+
+    #[test]
+    fn test_network_connection_id_generation() {
+        let config = NetworkConfig::default();
+        let connection1 = NetworkConnection::new(config.clone());
+        let connection2 = NetworkConnection::new(config);
+        
+        // IDs should be unique
+        assert_ne!(connection1.id(), connection2.id());
+        
+        // IDs should not be empty
+        assert!(!connection1.id().is_empty());
+        assert!(!connection2.id().is_empty());
+    }
+
+    #[test]
+    fn test_network_connection_config_access() {
+        let config = NetworkConfig::default();
+        let connection = NetworkConnection::new(config.clone());
+        
+        let retrieved_config = connection.config();
+        assert_eq!(retrieved_config.hostname, config.hostname);
+        assert_eq!(retrieved_config.port, config.port);
+        assert_eq!(retrieved_config.timeout, config.timeout);
+    }
+
+    #[test]
+    fn test_network_connection_next_channel() {
+        let config = NetworkConfig::default();
+        let mut connection = NetworkConnection::new(config);
+        
+        // Initial channel should be 0
+        assert_eq!(connection.next_channel(), 0);
+        
+        // Next channel should increment
+        assert_eq!(connection.next_channel(), 1);
+        assert_eq!(connection.next_channel(), 2);
+    }
+
+    #[test]
+    fn test_network_connection_is_idle() {
+        let config = NetworkConfig::default();
+        let connection = NetworkConnection::new(config);
+        
+        // New connection should not be idle immediately
+        assert!(!connection.is_idle());
+    }
+
+    #[test]
+    fn test_network_connection_state_access() {
+        let config = NetworkConfig::default();
+        let connection = NetworkConnection::new(config);
+        
+        let state = connection.state();
+        assert_eq!(state, &NetworkState::Disconnected);
+    }
+
+    #[test]
+    fn test_network_connection_id_access() {
+        let config = NetworkConfig::default();
+        let connection = NetworkConnection::new(config);
+        
+        let id = connection.id();
+        assert!(!id.is_empty());
+        
+        // ID should be consistent
+        assert_eq!(connection.id(), id);
+    }
+
+    #[test]
+    fn test_network_builder_fluent_api() {
+        let connection = NetworkBuilder::new()
+            .hostname("fluent-host")
+            .port(9999)
+            .timeout(Duration::from_secs(45))
+            .keep_alive(Duration::from_secs(90))
+            .max_frame_size(262144)
+            .channel_max(750)
+            .idle_timeout(Duration::from_secs(120))
+            .container_id("fluent-container")
+            .property("version", AmqpValue::String("1.0".to_string()))
+            .property("debug", AmqpValue::Boolean(true))
+            .build();
+        
+        assert_eq!(connection.config.hostname, "fluent-host");
+        assert_eq!(connection.config.port, 9999);
+        assert_eq!(connection.config.timeout, Duration::from_secs(45));
+        assert_eq!(connection.config.keep_alive, Duration::from_secs(90));
+        assert_eq!(connection.config.max_frame_size, 262144);
+        assert_eq!(connection.config.channel_max, 750);
+        assert_eq!(connection.config.idle_timeout, Duration::from_secs(120));
+        assert_eq!(connection.config.container_id, "fluent-container");
+        assert_eq!(connection.config.properties.len(), 2);
+    }
+
+    #[test]
+    fn test_network_connection_with_custom_config() {
+        let mut config = NetworkConfig::default();
+        config.hostname = "custom-host".to_string();
+        config.port = 8888;
+        config.timeout = Duration::from_secs(60);
+        config.keep_alive = Duration::from_secs(120);
+        config.max_frame_size = 131072;
+        config.channel_max = 500;
+        config.idle_timeout = Duration::from_secs(180);
+        config.container_id = "custom-container".to_string();
+        
+        let connection = NetworkConnection::new(config);
+        
+        assert_eq!(connection.config.hostname, "custom-host");
+        assert_eq!(connection.config.port, 8888);
+        assert_eq!(connection.config.timeout, Duration::from_secs(60));
+        assert_eq!(connection.config.keep_alive, Duration::from_secs(120));
+        assert_eq!(connection.config.max_frame_size, 131072);
+        assert_eq!(connection.config.channel_max, 500);
+        assert_eq!(connection.config.idle_timeout, Duration::from_secs(180));
+        assert_eq!(connection.config.container_id, "custom-container");
+    }
+
+    #[test]
+    fn test_network_connection_methods() {
+        let connection = NetworkConnection::new(NetworkConfig::default());
+        
+        // Test initial state
+        assert_eq!(connection.state(), &NetworkState::Disconnected);
+        assert!(!connection.id().is_empty());
+        assert_eq!(connection.next_channel, 0);
+        
+        // Test state access
+        let state = connection.state();
+        assert_eq!(state, &NetworkState::Disconnected);
+        
+        // Test ID access
+        let id = connection.id();
+        assert_eq!(id, connection.id());
+        
+        // Test config access
+        let config = connection.config();
+        assert_eq!(config.hostname, "localhost");
+        assert_eq!(config.port, 5672);
     }
 } 
